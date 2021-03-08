@@ -1,0 +1,3 @@
+[submodule "hanabi"]
+	path = hanabi
+	url = https://github.com/deepmind/hanabi-learning-environment
