@@ -25,7 +25,7 @@ from stable_baselines3.common.utils import get_device, is_vectorized_observation
 from stable_baselines3.common.vec_env import VecTransposeImage
 
 
-class BaseModel(nn.Module, ABC):
+class BaseModel(ABC, nn.Module):
     """
     The base model object: makes predictions in response to observations.
 
@@ -206,6 +206,7 @@ class BasePolicy(BaseModel):
     def predict(
         self,
         observation: np.ndarray,
+        partner_idx: int = 0,
         state: Optional[np.ndarray] = None,
         mask: Optional[np.ndarray] = None,
         deterministic: bool = False,
@@ -248,7 +249,7 @@ class BasePolicy(BaseModel):
 
         observation = th.as_tensor(observation).to(self.device)
         with th.no_grad():
-            actions = self._predict(observation, deterministic=deterministic)
+            actions = self._predict(observation, partner_idx=partner_idx, deterministic=deterministic)
         # Convert to numpy
         actions = actions.cpu().numpy()
 

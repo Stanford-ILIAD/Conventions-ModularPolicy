@@ -7,6 +7,7 @@ from stable_baselines3.common.vec_env import VecEnv
 def evaluate_policy(
     model,
     env,
+    partner_idx=0,
     n_eval_episodes=10,
     deterministic=True,
     render=False,
@@ -43,7 +44,7 @@ def evaluate_policy(
         episode_reward = 0.0
         episode_length = 0
         while not done:
-            action, state = model.predict(obs, state=state, deterministic=deterministic)
+            action, _ = model.predict(observation=obs, partner_idx=partner_idx, deterministic=deterministic)
             obs, reward, done, _info = env.step(action)
             episode_reward += reward
             if callback is not None:

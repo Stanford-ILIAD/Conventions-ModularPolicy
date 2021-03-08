@@ -298,6 +298,7 @@ class BaseAlgorithm(ABC):
     def predict(
         self,
         observation: np.ndarray,
+        partner_idx: int = 0,
         state: Optional[np.ndarray] = None,
         mask: Optional[np.ndarray] = None,
         deterministic: bool = False,
@@ -312,7 +313,7 @@ class BaseAlgorithm(ABC):
         :return: (Tuple[np.ndarray, Optional[np.ndarray]]) the model's action and the next state
             (used in recurrent policies)
         """
-        return self.policy.predict(observation, state, mask, deterministic)
+        return self.policy.predict(observation, partner_idx, state, mask, deterministic)
 
     @classmethod
     def load(cls, load_path: str, env: Optional[GymEnv] = None, **kwargs) -> "BaseAlgorithm":

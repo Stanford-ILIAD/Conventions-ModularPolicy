@@ -11,6 +11,10 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback
 from stable_baselines3.common.utils import explained_variance, get_schedule_fn
 
+from stable_baselines3.common.distributions import (make_proba_distribution, Distribution,
+                                                    DiagGaussianDistribution, CategoricalDistribution,
+                                                    MultiCategoricalDistribution, BernoulliDistribution,
+                                                    StateDependentNoiseDistribution)
 
 class PPO(OnPolicyAlgorithm):
     """
@@ -87,6 +91,9 @@ class PPO(OnPolicyAlgorithm):
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
+
+        # my additional arguments
+        marginal_reg_coef: float = 0.0,
     ):
 
         super(PPO, self).__init__(
@@ -109,6 +116,8 @@ class PPO(OnPolicyAlgorithm):
             seed=seed,
             _init_setup_model=False,
         )
+
+        self.marginal_reg_coef = marginal_reg_coef
 
         self.batch_size = batch_size
         self.n_epochs = n_epochs
@@ -147,97 +156,120 @@ class PPO(OnPolicyAlgorithm):
         pg_losses, value_losses = [], []
         clip_fractions = []
 
-        # train for gradient_steps epochs
-        for epoch in range(self.n_epochs):
-            approx_kl_divs = []
-            # Do a complete pass on the rollout buffer
-            for rollout_data in self.rollout_buffer.get(self.batch_size):
-                actions = rollout_data.actions
-                if isinstance(self.action_space, spaces.Discrete):
-                    # Convert discrete action from float to long
-                    actions = rollout_data.actions.long().flatten()
+        for partner_idx in range(self.policy.num_partners):
+            # train for gradient_steps epochs
+            for epoch in range(self.n_epochs):
+                approx_kl_divs = []
+                # Do a complete pass on the rollout buffer
+                # for rollout_data in self.rollout_buffer.get(self.batch_size):
+                for rollout_data in self.rollout_buffer[partner_idx].get(self.batch_size):
+                    actions = rollout_data.actions
+                    if isinstance(self.action_space, spaces.Discrete):
+                        # Convert discrete action from float to long
+                        actions = rollout_data.actions.long().flatten()
 
-                # Re-sample the noise matrix because the log_std has changed
-                # TODO: investigate why there is no issue with the gradient
-                # if that line is commented (as in SAC)
-                if self.use_sde:
-                    self.policy.reset_noise(self.batch_size)
+                    # Re-sample the noise matrix because the log_std has changed
+                    # TODO: investigate why there is no issue with the gradient
+                    # if that line is commented (as in SAC)
+                    if self.use_sde:
+                        self.policy.reset_noise(self.batch_size)
 
-                values, log_prob, entropy = self.policy.evaluate_actions(rollout_data.observations, actions)
-                values = values.flatten()
-                # Normalize advantage
-                advantages = rollout_data.advantages
-                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+                    #values, log_prob, entropy = self.policy.evaluate_actions(rollout_data.observations, actions)
+                    values, log_prob, entropy = self.policy.evaluate_actions(rollout_data.observations, actions, partner_idx=partner_idx) 
+                    values = values.flatten()
+                    # Normalize advantage
+                    advantages = rollout_data.advantages
+                    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-                # ratio between old and new policy, should be one at the first iteration
-                ratio = th.exp(log_prob - rollout_data.old_log_prob)
+                    # ratio between old and new policy, should be one at the first iteration
+                    ratio = th.exp(log_prob - rollout_data.old_log_prob)
 
-                # clipped surrogate loss
-                policy_loss_1 = advantages * ratio
-                policy_loss_2 = advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
-                policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
+                    # clipped surrogate loss
+                    policy_loss_1 = advantages * ratio
+                    policy_loss_2 = advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
+                    policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
 
-                # Logging
-                pg_losses.append(policy_loss.item())
-                clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
-                clip_fractions.append(clip_fraction)
+                    # Logging
+                    pg_losses.append(policy_loss.item())
+                    clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
+                    clip_fractions.append(clip_fraction)
 
-                if self.clip_range_vf is None:
-                    # No clipping
-                    values_pred = values
-                else:
-                    # Clip the different between old and new value
-                    # NOTE: this depends on the reward scaling
-                    values_pred = rollout_data.old_values + th.clamp(
-                        values - rollout_data.old_values, -clip_range_vf, clip_range_vf
-                    )
-                # Value loss using the TD(gae_lambda) target
-                value_loss = F.mse_loss(rollout_data.returns, values_pred)
-                value_losses.append(value_loss.item())
+                    if self.clip_range_vf is None:
+                        # No clipping
+                        values_pred = values
+                    else:
+                        # Clip the different between old and new value
+                        # NOTE: this depends on the reward scaling
+                        values_pred = rollout_data.old_values + th.clamp(
+                            values - rollout_data.old_values, -clip_range_vf, clip_range_vf
+                        )
+                    # Value loss using the TD(gae_lambda) target
+                    value_loss = F.mse_loss(rollout_data.returns, values_pred)
+                    value_losses.append(value_loss.item())
 
-                # Entropy loss favor exploration
-                if entropy is None:
-                    # Approximate entropy when no analytical form
-                    entropy_loss = -log_prob.mean()
-                else:
-                    entropy_loss = -th.mean(entropy)
+                    # Entropy loss favor exploration
+                    if entropy is None:
+                        # Approximate entropy when no analytical form
+                        entropy_loss = log_prob.mean()
+                    else:
+                        entropy_loss = -th.mean(entropy)
 
-                entropy_losses.append(entropy_loss.item())
+                    entropy_losses.append(entropy_loss.item())
 
-                loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss
+                    ###########
+                    # Marginal Regularization
+                    ###########
+                    # each action_dist is a Distribution object containing self.batch_size observations
+                    # dist.distribution.probs returns a tensor of shape (self.batch_size, self.action_space)
+                    # dist.sample() returns a tensor of shape (self.batch_size)
 
-                # Optimization step
-                self.policy.optimizer.zero_grad()
-                loss.backward()
-                # Clip grad norm
-                th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-                self.policy.optimizer.step()
-                approx_kl_divs.append(th.mean(rollout_data.old_log_prob - log_prob).detach().cpu().numpy())
+                    # careful: must extract torch distribution object from stable_baseline Distribution object, otherwise old references get overwritten
+                    main_logits, partner_logits = zip( *[self.policy.get_action_logits_from_obs(rollout_data.observations, partner_idx=idx) for idx in range(self.policy.num_partners)] )
+                    main_logits = th.stack([logits for logits in main_logits]) # (num_partners, self.batch_size, self.action_space)
+                    partner_logits = th.stack([logits for logits in partner_logits]) # (num_partners, self.batch_size, self.action_space)
+                    composed_logits = main_logits + partner_logits
 
-            all_kl_divs.append(np.mean(approx_kl_divs))
+                    # Regularize main prob to be the marginals
+                    # Wasserstein metric with unitary distances (for categorical actions)
+                    main_probs = th.mean( th.exp(main_logits - main_logits.logsumexp(dim=-1, keepdim=True)), dim=0 )
+                    composed_probs = th.mean( th.exp(composed_logits - composed_logits.logsumexp(dim=-1, keepdim=True)), dim=0 )
+                    marginal_regularization_loss = th.mean(th.sum( th.abs(main_probs - composed_probs), dim=1))
+                    ###########
 
-            if self.target_kl is not None and np.mean(approx_kl_divs) > 1.5 * self.target_kl:
-                print(f"Early stopping at step {epoch} due to reaching max kl: {np.mean(approx_kl_divs):.2f}")
-                break
+                    loss = policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss + self.marginal_reg_coef * marginal_regularization_loss
+
+                    # Optimization step
+                    self.policy.optimizer.zero_grad()
+                    loss.backward()
+                    # Clip grad norm
+                    th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                    self.policy.optimizer.step()
+                    approx_kl_divs.append(th.mean(rollout_data.old_log_prob - log_prob).detach().cpu().numpy())
+
+                all_kl_divs.append(np.mean(approx_kl_divs))
+
+                if self.target_kl is not None and np.mean(approx_kl_divs) > 1.5 * self.target_kl:
+                    print(f"Early stopping at step {epoch} due to reaching max kl: {np.mean(approx_kl_divs):.2f}")
+                    break
 
         self._n_updates += self.n_epochs
-        explained_var = explained_variance(self.rollout_buffer.returns.flatten(), self.rollout_buffer.values.flatten())
+        # explained_var = explained_variance(self.rollout_buffer.returns.flatten(), self.rollout_buffer.values.flatten())
 
-        # Logs
+        # # Logs
         logger.record("train/entropy_loss", np.mean(entropy_losses))
         logger.record("train/policy_gradient_loss", np.mean(pg_losses))
         logger.record("train/value_loss", np.mean(value_losses))
-        logger.record("train/approx_kl", np.mean(approx_kl_divs))
-        logger.record("train/clip_fraction", np.mean(clip_fraction))
+        # logger.record("train/approx_kl", np.mean(approx_kl_divs))
+        # logger.record("train/clip_fraction", np.mean(clip_fraction))
         logger.record("train/loss", loss.item())
-        logger.record("train/explained_variance", explained_var)
-        if hasattr(self.policy, "log_std"):
-            logger.record("train/std", th.exp(self.policy.log_std).mean().item())
+        # logger.record("train/explained_variance", explained_var)
+        # if hasattr(self.policy, "log_std"):
+        #     logger.record("train/std", th.exp(self.policy.log_std).mean().item())
 
-        logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
-        logger.record("train/clip_range", clip_range)
-        if self.clip_range_vf is not None:
-            logger.record("train/clip_range_vf", clip_range_vf)
+        # logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
+        # logger.record("train/clip_range", clip_range)
+        # if self.clip_range_vf is not None:
+        #     logger.record("train/clip_range_vf", clip_range_vf)
 
     def learn(
         self,
