@@ -1,3 +1,24 @@
+This repository contains code for the paper:
+
+[On the Critical Role of Conventions in Adaptive Human-AI Collaboration](https://openreview.net/pdf?id=8Ln-Bq0mZcy)
+
+```
+"On the Critical Role of Conventions in Adaptive Human-AI Collaboration"
+Andy Shih, Arjun Sawhney, Jovana Kondic, Stefano Ermon, Dorsa Sadigh
+Proceedings of the 9th International Conference on Learning Representations (ICLR 2021)
+
+@inproceedings{SSKESiclr21,
+  author    = {Andy Shih and Arjun Sawhney and Jovana Kondic and Stefano Ermon and Dorsa Sadigh},
+  title     = {On the Critical Role of Conventions in Adaptive Human-AI Collaboration},
+  booktitle = {Proceedings of the 9th International Conference on Learning Representations (ICLR)},
+  month     = {may},
+  year      = {2021},
+  keywords  = {conference}
+}
+```
+
+# Instructions
+
 Install gym environment, hanabi environment, and stable baselines
 ```
 pip install .
